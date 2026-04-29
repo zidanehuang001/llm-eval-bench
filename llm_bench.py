@@ -153,7 +153,7 @@ def build_command(bench, url, model, api_key, tool, batch, timeout, out_dir):
             "--datasets",        bench,
             "--eval-batch-size", str(batch),
             "--repeats",         "1",
-            "--timeout",         str(timeout),
+            "--timeout",         str(timeout * 1000),  # evalscope expects milliseconds
         ]
     if tool == "lm-eval":
         task = LM_EVAL_MAP.get(bench, bench)
