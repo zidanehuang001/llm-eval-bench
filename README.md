@@ -73,7 +73,7 @@ If any host fails warmup the script aborts before running any benchmarks.
   Host 1: 10.6.142.6:8000
     pending (7): aime25, gsm8k, humaneval, mmlu_pro, cmmlu, arc, truthful_qa
   Host 2: 10.6.142.22:8000
-    pending (7): hmmt25, math500, mmlu, ceval, hellaswag, simple_qa, ifeval
+    pending (7): hmmt25, math_500, mmlu, ceval, hellaswag, simple_qa, ifeval
 ============================================================
 ```
 
@@ -95,7 +95,7 @@ Per-benchmark timeout and batch size are set automatically. The `--timeout` and 
 |---|---|---|---|---|
 | `aime25` | AIME 2025 | Competition math | 600s | 4 |
 | `hmmt25` | HMMT 2025 | Competition math | 600s | 4 |
-| `math500` | MATH-500 | Hard math problems | 300s | 8 |
+| `math_500` | MATH-500 | Hard math problems | 300s | 8 |
 | `humaneval` | HumanEval | Python code generation | 300s | 8 |
 | `ifeval` | IFEval | Instruction-following | 240s | 16 |
 | `gsm8k` | GSM8K | Grade-school math reasoning | 120s | 16 |

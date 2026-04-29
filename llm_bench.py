@@ -31,7 +31,7 @@ except ImportError:
 # ─── Benchmark lists ──────────────────────────────────────────────────────────
 LLM_BENCHES = [
     # Math / reasoning
-    "aime25", "hmmt25", "gsm8k", "math500",
+    "aime25", "hmmt25", "gsm8k", "math_500",
     # Coding
     "humaneval",
     # General knowledge
@@ -58,14 +58,14 @@ VLM_BENCHES = [
 # ─── Per-benchmark overrides ──────────────────────────────────────────────────
 BENCH_TIMEOUT = {
     "aime25": 600, "hmmt25": 600,
-    "math500": 300, "humaneval": 300, "ifeval": 240,
+    "math_500": 300, "humaneval": 300, "ifeval": 240,
     "mmbench": 180, "mme": 180, "mmstar": 180, "seed_bench": 180,
     "pope": 180, "vqav2": 180, "textvqa": 180, "ocrbench": 180, "scienceqa": 240,
     "chartqa": 300, "docvqa": 300, "mathvista": 360, "hallusionbench": 300,
 }
 
 BENCH_BATCH = {
-    "aime25": 4, "hmmt25": 4, "math500": 8, "humaneval": 8,
+    "aime25": 4, "hmmt25": 4, "math_500": 8, "humaneval": 8,
     "mmbench": 8, "mme": 8, "mmstar": 8, "seed_bench": 8,
     "pope": 8, "vqav2": 8, "textvqa": 8, "ocrbench": 8, "scienceqa": 8,
     "chartqa": 4, "docvqa": 4, "mathvista": 4, "hallusionbench": 4,
@@ -74,7 +74,7 @@ BENCH_BATCH = {
 # ─── Tool-specific name mappings ──────────────────────────────────────────────
 LM_EVAL_MAP = {
     "mmlu": "mmlu", "mmlu_pro": "mmlu_pro", "gsm8k": "gsm8k",
-    "math500": "minerva_math", "humaneval": "humaneval",
+    "math_500": "minerva_math", "humaneval": "humaneval",
     "hellaswag": "hellaswag", "arc": "arc_challenge",
     "truthful_qa": "truthfulqa_mc2", "ifeval": "ifeval",
     "ceval": "ceval-valid", "cmmlu": "cmmlu", "simple_qa": "simpleqa",
@@ -83,7 +83,7 @@ LM_EVAL_MAP = {
 
 OC_MAP = {
     "mmlu": "mmlu_gen", "mmlu_pro": "mmlu_pro_gen", "gsm8k": "gsm8k_gen",
-    "math500": "math_gen", "humaneval": "humaneval_gen",
+    "math_500": "math_gen", "humaneval": "humaneval_gen",
     "hellaswag": "hellaswag_ppl", "arc": "ARC_e_gen",
     "ceval": "ceval_gen", "cmmlu": "cmmlu_gen",
     "truthful_qa": "truthful_qa_gen", "ifeval": "ifeval_gen",
