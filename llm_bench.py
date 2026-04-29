@@ -199,6 +199,8 @@ def run_one(bench, url, args, out_dir, log_dir, host_bar=None, overall_bar=None)
     log_path = os.path.join(log_dir, f"{bench}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
     log(f"  [START] {bench:<22} [{label}]  batch={batch}  timeout={timeout}s")
+    if host_bar is not None:
+        host_bar.set_postfix_str(f"running: {bench}")
 
     cmd = build_command(bench, url, args.model, args.api_key, args.tool, batch, timeout, out_dir)
     try:
