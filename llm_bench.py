@@ -178,14 +178,17 @@ def build_command(bench, url, model, api_key, tool, batch, timeout, out_dir):
     raise ValueError(f"Unknown tool: {tool}")
 
 # ─── Core runner ──────────────────────────────────────────────────────────────
-def run_one(bench, url, args, out_dir, log_dir, host_bar=None, overall_bar=None):
+def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None):
     label     = host_label(url)
     done_file = os.path.join(out_dir, f"{bench}.done")
 
+    def _set(text):
+        if bench_bar is not None:
+            bench_bar.set_description_str(f"  {bench:<14} [{label:<22}]: {text}")
+            bench_bar.refresh()
+
     def _done(status, msg):
-        if host_bar is not None:
-            host_bar.set_postfix_str(f"{bench}: {status}")
-            host_bar.update(1)
+        _set(status)
         if overall_bar is not None:
             overall_bar.update(1)
         log(msg)
@@ -199,8 +202,7 @@ def run_one(bench, url, args, out_dir, log_dir, host_bar=None, overall_bar=None)
     log_path = os.path.join(log_dir, f"{bench}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
     log(f"  [START] {bench:<22} [{label}]  batch={batch}  timeout={timeout}s")
-    if host_bar is not None:
-        host_bar.set_postfix_str(f"running: {bench}")
+    _set("running...")
 
     cmd = build_command(bench, url, args.model, args.api_key, args.tool, batch, timeout, out_dir)
     try:
@@ -208,10 +210,10 @@ def run_one(bench, url, args, out_dir, log_dir, host_bar=None, overall_bar=None)
             proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
         if proc.returncode == 0:
             open(done_file, "w").close()
-            return _done("pass", f"  [PASS]  {bench:<22} [{label}]")
-        return _done("fail", f"  [FAIL]  {bench:<22} [{label}] exit={proc.returncode} log={log_path}")
+            return _done("PASS", f"  [PASS]  {bench:<22} [{label}]")
+        return _done(f"FAIL (exit={proc.returncode})", f"  [FAIL]  {bench:<22} [{label}] exit={proc.returncode} log={log_path}")
     except Exception as exc:
-        return _done("fail", f"  [FAIL]  {bench:<22} [{label}] {exc}")
+        return _done(f"FAIL ({exc})", f"  [FAIL]  {bench:<22} [{label}] {exc}")
 
 # ─── Report ───────────────────────────────────────────────────────────────────
 def generate_report(out_dir):
@@ -419,33 +421,34 @@ def main():
     totals = {"pass": 0, "fail": 0, "skip": 0}
     max_workers = len(hosts) * args.workers
 
-    # One progress bar per host + one overall bar at the bottom
+    # One status bar per benchmark + one overall progress bar at the bottom
     if HAS_TQDM:
-        host_bars = {
-            h: tqdm(
-                total=len(host_pending[h]) + len(host_skip[h]),
-                desc=f"Host {i+1} [{host_label(h):<20}]",
+        bench_bars = {}
+        for i, (bench, url) in enumerate(assignments):
+            label = host_label(url)
+            bar = tqdm(
+                total=0,
+                desc=f"  {bench:<14} [{label:<22}]: waiting",
+                bar_format="{desc}",
                 position=i,
                 leave=True,
-                unit="bench",
             )
-            for i, h in enumerate(hosts)
-        }
+            bench_bars[(bench, url)] = bar
         overall_bar = tqdm(
             total=len(assignments),
-            desc=f"{'Overall':<28}",
-            position=len(hosts),
+            desc="Overall",
+            position=len(assignments),
             leave=True,
             unit="bench",
         )
     else:
-        host_bars, overall_bar = {}, None
+        bench_bars, overall_bar = {}, None
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
                 run_one, bench, url, args, out_dir, log_dir,
-                host_bars.get(url), overall_bar
+                bench_bars.get((bench, url)), overall_bar
             ): bench
             for bench, url in assignments
         }
@@ -457,7 +460,7 @@ def main():
                 log(f"  Unexpected error: {exc}")
                 totals["fail"] += 1
 
-    for bar in host_bars.values():
+    for bar in bench_bars.values():
         bar.close()
     if overall_bar:
         overall_bar.close()
