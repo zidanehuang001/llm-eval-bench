@@ -178,14 +178,16 @@ def build_command(bench, url, model, api_key, tool, batch, timeout, out_dir):
     raise ValueError(f"Unknown tool: {tool}")
 
 # ─── Core runner ──────────────────────────────────────────────────────────────
-def run_one(bench, url, args, out_dir, log_dir, pbar=None):
+def run_one(bench, url, args, out_dir, log_dir, host_bar=None, overall_bar=None):
     label     = host_label(url)
     done_file = os.path.join(out_dir, f"{bench}.done")
 
     def _done(status, msg):
-        if pbar is not None:
-            pbar.update(1)
-            pbar.set_postfix_str(f"{bench} {status}")
+        if host_bar is not None:
+            host_bar.set_postfix_str(f"{bench}: {status}")
+            host_bar.update(1)
+        if overall_bar is not None:
+            overall_bar.update(1)
         log(msg)
         return bench, status
 
@@ -414,11 +416,35 @@ def main():
 
     totals = {"pass": 0, "fail": 0, "skip": 0}
     max_workers = len(hosts) * args.workers
-    pbar = tqdm(total=len(assignments), unit="bench", disable=not HAS_TQDM) if HAS_TQDM else None
+
+    # One progress bar per host + one overall bar at the bottom
+    if HAS_TQDM:
+        host_bars = {
+            h: tqdm(
+                total=len(host_pending[h]) + len(host_skip[h]),
+                desc=f"Host {i+1} [{host_label(h):<20}]",
+                position=i,
+                leave=True,
+                unit="bench",
+            )
+            for i, h in enumerate(hosts)
+        }
+        overall_bar = tqdm(
+            total=len(assignments),
+            desc=f"{'Overall':<28}",
+            position=len(hosts),
+            leave=True,
+            unit="bench",
+        )
+    else:
+        host_bars, overall_bar = {}, None
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(run_one, bench, url, args, out_dir, log_dir, pbar): bench
+            executor.submit(
+                run_one, bench, url, args, out_dir, log_dir,
+                host_bars.get(url), overall_bar
+            ): bench
             for bench, url in assignments
         }
         for future in as_completed(futures):
@@ -429,8 +455,10 @@ def main():
                 log(f"  Unexpected error: {exc}")
                 totals["fail"] += 1
 
-    if pbar:
-        pbar.close()
+    for bar in host_bars.values():
+        bar.close()
+    if overall_bar:
+        overall_bar.close()
 
     print()
     print("=" * 60)
