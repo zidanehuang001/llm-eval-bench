@@ -201,13 +201,11 @@ def run_one(bench, url, args, out_dir, log_dir, pbar=None):
     cmd = build_command(bench, url, args.model, args.api_key, args.tool, batch, timeout, out_dir)
     try:
         with open(log_path, "w") as lf:
-            proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, timeout=timeout + 60)
+            proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
         if proc.returncode == 0:
             open(done_file, "w").close()
             return _done("pass", f"  [PASS]  {bench:<22} [{label}]")
         return _done("fail", f"  [FAIL]  {bench:<22} [{label}] exit={proc.returncode} log={log_path}")
-    except subprocess.TimeoutExpired:
-        return _done("fail", f"  [FAIL]  {bench:<22} [{label}] process timeout — {log_path}")
     except Exception as exc:
         return _done("fail", f"  [FAIL]  {bench:<22} [{label}] {exc}")
 
