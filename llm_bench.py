@@ -192,8 +192,8 @@ def run_one(bench, url, args, out_dir, log_dir, pbar=None):
     if args.resume and os.path.exists(done_file):
         return _done("skip", f"  [SKIP]  {bench:<22} [{label}]")
 
-    timeout  = BENCH_TIMEOUT.get(bench, args.timeout)
-    batch    = BENCH_BATCH.get(bench, args.batch)
+    timeout  = max(BENCH_TIMEOUT.get(bench, args.timeout), args.timeout)
+    batch    = min(BENCH_BATCH.get(bench, args.batch),    args.batch)
     log_path = os.path.join(log_dir, f"{bench}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
     log(f"  [START] {bench:<22} [{label}]  batch={batch}  timeout={timeout}s")
