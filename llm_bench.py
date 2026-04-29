@@ -6,6 +6,8 @@ import csv
 import glob
 import json
 import os
+import re
+import select
 import subprocess
 import sys
 import urllib.error
@@ -13,6 +15,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from threading import Lock
+
+try:
+    import pty
+    HAS_PTY = True
+except ImportError:
+    HAS_PTY = False
 
 try:
     from tqdm import tqdm
@@ -177,6 +185,60 @@ def build_command(bench, url, model, api_key, tool, batch, timeout, out_dir):
         ]
     raise ValueError(f"Unknown tool: {tool}")
 
+# ─── PTY subprocess runner ────────────────────────────────────────────────────
+_ANSI_RE = re.compile(rb'\x1b\[[0-9;]*[A-Za-z]')
+_PROG_RE  = re.compile(r'(\d+)/(\d+)')
+
+def _run_pty(cmd, log_path, on_progress=None):
+    """Run cmd under a pseudo-terminal so tqdm stays active; stream output to log."""
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    recent = b""
+    with open(log_path, "wb") as lf:
+        while True:
+            try:
+                r, _, _ = select.select([master_fd], [], [], 0.5)
+            except (ValueError, OSError):
+                break
+            if r:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    break
+                # Write clean log: strip ANSI codes, convert \r to \n
+                lf.write(_ANSI_RE.sub(b"", chunk).replace(b"\r", b"\n"))
+                lf.flush()
+                if on_progress is not None:
+                    recent = (recent + chunk)[-512:]
+                    text = _ANSI_RE.sub(b"", recent).decode("utf-8", errors="replace")
+                    matches = list(_PROG_RE.finditer(text))
+                    if matches:
+                        m = matches[-1]
+                        n, t = int(m.group(1)), int(m.group(2))
+                        if 0 < t and n <= t:
+                            on_progress(n, t)
+            if proc.poll() is not None:
+                try:
+                    while True:
+                        chunk = os.read(master_fd, 4096)
+                        lf.write(_ANSI_RE.sub(b"", chunk).replace(b"\r", b"\n"))
+                except OSError:
+                    pass
+                break
+    try:
+        os.close(master_fd)
+    except OSError:
+        pass
+    proc.wait()
+    return proc
+
 # ─── Core runner ──────────────────────────────────────────────────────────────
 def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None):
     label     = host_label(url)
@@ -206,8 +268,11 @@ def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None
 
     cmd = build_command(bench, url, args.model, args.api_key, args.tool, batch, timeout, out_dir)
     try:
-        with open(log_path, "w") as lf:
-            proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
+        if HAS_PTY and bench_bar is not None:
+            proc = _run_pty(cmd, log_path, on_progress=lambda n, t: _set(f"{n}/{t} running..."))
+        else:
+            with open(log_path, "w") as lf:
+                proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
         if proc.returncode == 0:
             open(done_file, "w").close()
             return _done("PASS", f"  [PASS]  {bench:<22} [{label}]")
