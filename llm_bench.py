@@ -290,6 +290,26 @@ def generate_report(out_dir):
     benches = sorted(os.path.splitext(os.path.basename(f))[0] for f in done_files)
 
     def _evalscope(bench):
+        # New evalscope format: outputs/{YYYYMMDD_HHMMSS}/reports/{model}/{bench}.json
+        pattern = os.path.join(out_dir, "*", "reports", "*", f"{bench}.json")
+        for f in sorted(glob.glob(pattern), reverse=True):  # newest timestamp dir first
+            try:
+                data = json.load(open(f))
+                score = data.get("score")
+                num   = None
+                if isinstance(data.get("metrics"), list) and data["metrics"]:
+                    num = data["metrics"][0].get("num")
+                if score is not None:
+                    ts_dir = os.path.basename(os.path.dirname(os.path.dirname(f)))
+                    try:
+                        ts = datetime.strptime(ts_dir, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M")
+                    except ValueError:
+                        ts = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M")
+                    return float(score), ts, num
+            except Exception:
+                pass
+
+        # Fallback: legacy evalscope report.json with nested structure
         for f in sorted(glob.glob(os.path.join(out_dir, "**", "report.json"), recursive=True)):
             try:
                 data = json.load(open(f))
@@ -311,10 +331,10 @@ def generate_report(out_dir):
                             score = first[key]; break
                 if score is not None:
                     ts = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M")
-                    return score, ts
+                    return score, ts, None
             except Exception:
                 pass
-        return None, None
+        return None, None, None
 
     def _lm_eval(bench):
         for f in sorted(glob.glob(os.path.join(out_dir, bench, "results_*.json")), reverse=True):
@@ -334,10 +354,10 @@ def generate_report(out_dir):
                         )
                     if score is not None:
                         ts = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M")
-                        return score, ts
+                        return score, ts, None
             except Exception:
                 pass
-        return None, None
+        return None, None, None
 
     def _opencompass(bench):
         pattern = os.path.join(out_dir, bench, "**", "summary", "*.csv")
@@ -348,34 +368,35 @@ def generate_report(out_dir):
                     raw = row.get("score") or row.get("accuracy") or row.get("Accuracy")
                     if raw and raw.strip() not in ("-", ""):
                         ts = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M")
-                        return float(raw), ts
+                        return float(raw), ts, None
             except Exception:
                 pass
-        return None, None
+        return None, None, None
 
     rows = []
     for bench in benches:
-        score = ts = tool = None
+        score = ts = tool = num = None
         for extractor, name in [(_evalscope, "evalscope"), (_lm_eval, "lm-eval"), (_opencompass, "opencompass")]:
-            s, t = extractor(bench)
+            s, t, n = extractor(bench)
             if s is not None:
-                score, ts, tool = s, t, name
+                score, ts, tool, num = s, t, name, n
                 break
-        rows.append((bench, score, tool, ts))
+        rows.append((bench, score, tool, ts, num))
 
     def fmt(s):
         if s is None: return "—"
         return f"{s * 100:.1f}%" if s <= 1.0 else f"{s:.1f}%"
 
-    sep = "─" * 60
+    sep = "─" * 68
     print()
     print(sep)
-    print(f"{'Benchmark':<22} {'Score':>8}  {'Tool':<12} Completed")
+    print(f"{'Benchmark':<22} {'Score':>8}  {'N':>6}  {'Tool':<12} Completed")
     print(sep)
-    for bench, score, tool, ts in rows:
-        print(f"{bench:<22} {fmt(score):>8}  {tool or '—':<12} {ts or '—'}")
+    for bench, score, tool, ts, num in rows:
+        n_str = str(num) if num is not None else "—"
+        print(f"{bench:<22} {fmt(score):>8}  {n_str:>6}  {tool or '—':<12} {ts or '—'}")
     print(sep)
-    found = sum(1 for _, s, _, _ in rows if s is not None)
+    found = sum(1 for _, s, _, _, _ in rows if s is not None)
     print(f"  {found}/{len(rows)} benchmarks have results  ({len(rows) - found} not yet parseable)")
     print()
 
