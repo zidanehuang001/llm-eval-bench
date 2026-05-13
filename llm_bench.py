@@ -63,6 +63,7 @@ BENCH_TIMEOUT = {
     "mmbench": 180, "mme": 180, "mmstar": 180, "seed_bench": 180,
     "pope": 180, "vqav2": 180, "textvqa": 180, "ocrbench": 180, "scienceqa": 240,
     "chartqa": 300, "docvqa": 300, "mathvista": 360, "hallusionbench": 300,
+    "math_vision": 600, "ocr_bench_v2": 300,
 }
 
 BENCH_BATCH = {
