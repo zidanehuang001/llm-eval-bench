@@ -59,6 +59,7 @@ VLM_BENCHES = [
 BENCH_TIMEOUT = {
     "aime25": 600, "hmmt25": 600,
     "math_500": 300, "humaneval": 300, "ifeval": 240,
+    "mmlu_pro": 600,
     "mmbench": 180, "mme": 180, "mmstar": 180, "seed_bench": 180,
     "pope": 180, "vqav2": 180, "textvqa": 180, "ocrbench": 180, "scienceqa": 240,
     "chartqa": 300, "docvqa": 300, "mathvista": 360, "hallusionbench": 300,
