@@ -12,6 +12,7 @@ import select
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -355,6 +356,74 @@ def _run_pty(cmd, log_path, on_progress=None):
     proc.wait()
     return proc
 
+# ─── EvalScope output QA ──────────────────────────────────────────────────────
+def _bench_review_files(out_dir, bench, since=None):
+    """Return the newest EvalScope review jsonl files for a benchmark."""
+    groups = {}
+    pattern = os.path.join(out_dir, "*", "reviews", "*", "*.jsonl")
+    bench_prefix = f"{bench}_".lower()
+    for path in glob.glob(pattern):
+        name = os.path.basename(path).lower()
+        if not (name == f"{bench}.jsonl".lower() or name.startswith(bench_prefix)):
+            continue
+        if since is not None and os.path.getmtime(path) < since:
+            continue
+        timestamp_dir = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+        groups.setdefault(timestamp_dir, []).append(path)
+    if not groups:
+        return []
+
+    newest_dir = max(
+        groups,
+        key=lambda d: max(os.path.getmtime(path) for path in groups[d]),
+    )
+    return sorted(groups[newest_dir])
+
+def _prediction_from_review(row):
+    score = ((row.get("sample_score") or {}).get("score") or {})
+    if "prediction" in score:
+        return score.get("prediction")
+    for key in ("prediction", "response", "output"):
+        if key in row:
+            return row.get(key)
+    return None
+
+def scan_empty_predictions(out_dir, bench, since=None):
+    """Scan newest EvalScope review files and return total rows + empty preds."""
+    files = _bench_review_files(out_dir, bench, since=since)
+    total = 0
+    empties = []
+    for path in files:
+        with open(path) as f:
+            for line_no, line in enumerate(f, 1):
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                total += 1
+                prediction = _prediction_from_review(row)
+                if prediction is not None and not str(prediction).strip():
+                    empties.append({
+                        "file": path,
+                        "line": line_no,
+                        "index": row.get("index"),
+                    })
+    return total, empties, files
+
+def _failed_file(out_dir, bench):
+    return os.path.join(out_dir, f"{bench}.failed")
+
+def _write_failed_marker(out_dir, bench, **info):
+    info.setdefault("bench", bench)
+    info.setdefault("failed_at", datetime.now().isoformat(timespec="seconds"))
+    with open(_failed_file(out_dir, bench), "w") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+
+def _clear_failed_marker(out_dir, bench):
+    try:
+        os.remove(_failed_file(out_dir, bench))
+    except FileNotFoundError:
+        pass
+
 # ─── Core runner ──────────────────────────────────────────────────────────────
 def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None):
     label     = host_label(url)
@@ -383,6 +452,7 @@ def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None
     _set("running...")
 
     cmd = build_command(bench, url, args.model, args.api_key, args.tool, batch, timeout, out_dir)
+    started_at = time.time() - 2
     try:
         if HAS_PTY and bench_bar is not None:
             proc = _run_pty(cmd, log_path, on_progress=lambda n, t: _set(f"{n}/{t} running..."))
@@ -390,20 +460,61 @@ def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None
             with open(log_path, "w") as lf:
                 proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
         if proc.returncode == 0:
+            if args.tool == "evalscope":
+                total, empties, files = scan_empty_predictions(out_dir, bench, since=started_at)
+                if total:
+                    empty_pct = len(empties) / total * 100
+                    log(f"  [QA]    {bench:<22} reviews={total} empty={len(empties)} ({empty_pct:.2f}%)")
+                    if empty_pct > args.empty_pred_threshold_pct:
+                        if os.path.exists(done_file):
+                            os.remove(done_file)
+                        _write_failed_marker(
+                            out_dir,
+                            bench,
+                            reason="empty_predictions",
+                            total=total,
+                            empty_count=len(empties),
+                            empty_pct=empty_pct,
+                            empty_threshold_pct=args.empty_pred_threshold_pct,
+                            empty_indices=[item["index"] for item in empties],
+                            review_files=files,
+                            log_path=log_path,
+                        )
+                        return _done(
+                            f"FAIL (empty={len(empties)}/{total})",
+                            f"  [FAIL]  {bench:<22} [{label}] empty_predictions={len(empties)}/{total} "
+                            f"({empty_pct:.2f}% > {args.empty_pred_threshold_pct:.2f}%) log={log_path}",
+                        )
+                else:
+                    log(f"  [QA]    {bench:<22} no EvalScope review rows found; skipping empty-prediction gate")
+            _clear_failed_marker(out_dir, bench)
             open(done_file, "w").close()
             return _done("PASS", f"  [PASS]  {bench:<22} [{label}]")
+        _write_failed_marker(out_dir, bench, reason="exit_code", exit_code=proc.returncode, log_path=log_path)
         return _done(f"FAIL (exit={proc.returncode})", f"  [FAIL]  {bench:<22} [{label}] exit={proc.returncode} log={log_path}")
     except Exception as exc:
+        _write_failed_marker(out_dir, bench, reason="exception", error=str(exc), log_path=log_path)
         return _done(f"FAIL ({exc})", f"  [FAIL]  {bench:<22} [{label}] {exc}")
 
 # ─── Report ───────────────────────────────────────────────────────────────────
 def generate_report(out_dir):
     done_files = glob.glob(os.path.join(out_dir, "*.done"))
-    if not done_files:
-        print(f"No completed benchmarks (.done files) in: {out_dir}")
+    failed_files = glob.glob(os.path.join(out_dir, "*.failed"))
+    if not done_files and not failed_files:
+        print(f"No completed or failed benchmark markers in: {out_dir}")
         return
 
-    benches = sorted(os.path.splitext(os.path.basename(f))[0] for f in done_files)
+    benches = sorted({
+        os.path.splitext(os.path.basename(f))[0]
+        for f in done_files + failed_files
+    })
+    done_benches = {os.path.splitext(os.path.basename(f))[0] for f in done_files}
+
+    def _failure_info(bench):
+        try:
+            return json.load(open(_failed_file(out_dir, bench)))
+        except Exception:
+            return None
 
     def _evalscope(bench):
         # New evalscope format: outputs/{YYYYMMDD_HHMMSS}/reports/{model}/{bench}.json
@@ -416,7 +527,7 @@ def generate_report(out_dir):
                 if isinstance(data.get("metrics"), list) and data["metrics"]:
                     num = data["metrics"][0].get("num")
                 if score is not None:
-                    ts_dir = os.path.basename(os.path.dirname(os.path.dirname(f)))
+                    ts_dir = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(f))))
                     try:
                         ts = datetime.strptime(ts_dir, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M")
                     except ValueError:
@@ -497,23 +608,39 @@ def generate_report(out_dir):
             if s is not None:
                 score, ts, tool, num = s, t, name, n
                 break
-        rows.append((bench, score, tool, ts, num))
+        failure = None if bench in done_benches else _failure_info(bench)
+        total, empties, _ = scan_empty_predictions(out_dir, bench)
+        empty_count = len(empties) if total else None
+        if failure is not None:
+            empty_count = failure.get("empty_count", empty_count)
+            ts = ts or failure.get("failed_at")
+            if failure.get("reason") == "empty_predictions":
+                status = f"FAIL empty={failure.get('empty_count', '?')}/{failure.get('total', '?')}"
+            elif failure.get("reason") == "exit_code":
+                status = f"FAIL exit={failure.get('exit_code', '?')}"
+            else:
+                status = f"FAIL {failure.get('reason', 'unknown')}"
+        else:
+            status = "done"
+        rows.append((bench, score, tool, ts, num, empty_count, status))
 
     def fmt(s):
         if s is None: return "—"
         return f"{s * 100:.1f}%" if s <= 1.0 else f"{s:.1f}%"
 
-    sep = "─" * 68
+    sep = "─" * 88
     print()
     print(sep)
-    print(f"{'Benchmark':<22} {'Score':>8}  {'N':>6}  {'Tool':<12} Completed")
+    print(f"{'Benchmark':<22} {'Score':>8}  {'N':>6}  {'Empty':>6}  {'Tool':<12} {'Status':<18} Completed")
     print(sep)
-    for bench, score, tool, ts, num in rows:
+    for bench, score, tool, ts, num, empty_count, status in rows:
         n_str = str(num) if num is not None else "—"
-        print(f"{bench:<22} {fmt(score):>8}  {n_str:>6}  {tool or '—':<12} {ts or '—'}")
+        empty_str = str(empty_count) if empty_count is not None else "—"
+        print(f"{bench:<22} {fmt(score):>8}  {n_str:>6}  {empty_str:>6}  {tool or '—':<12} {status:<18} {ts or '—'}")
     print(sep)
-    found = sum(1 for _, s, _, _, _ in rows if s is not None)
-    print(f"  {found}/{len(rows)} benchmarks have results  ({len(rows) - found} not yet parseable)")
+    found = sum(1 for _, s, _, _, _, _, _ in rows if s is not None)
+    failed = sum(1 for *_, status in rows if status != "done")
+    print(f"  {found}/{len(rows)} benchmarks have results  ({len(rows) - found} not yet parseable, {failed} failed)")
     print()
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -548,6 +675,9 @@ Examples:
                    help="Local request-splitting proxy port (default: 0 = auto)")
     p.add_argument("--proxy-timeout", type=int, default=int(os.environ.get("PROXY_TIMEOUT", "0")),
                    help="Proxy upstream timeout in seconds (default: max selected benchmark timeout)")
+    p.add_argument("--empty-pred-threshold-pct", type=float,
+                   default=float(os.environ.get("EMPTY_PRED_THRESHOLD_PCT", "0")),
+                   help="Fail evalscope benchmarks when empty predictions exceed this percent (default: 0)")
     p.add_argument("--vlm",      action="store_true", help="Run VLM benchmarks only")
     p.add_argument("--all",      action="store_true", help="Run all LLM + VLM benchmarks")
     p.add_argument("--benches",  default="", help="Comma-separated benchmark override list")

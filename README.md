@@ -40,16 +40,17 @@ python llm_bench.py --host 10.7.2.33 --model qwen2.5-vl-7b --all
 | `--batch N` | `16` | Default eval batch size (per-benchmark overrides apply) |
 | `--timeout N` | `120` | Default per-request timeout in seconds (per-benchmark overrides apply) |
 | `--workers N` | `1` | Concurrent benchmarks per host (total = hosts × workers) |
-| `--split-requests` / `--split-samples` | — | With `--hosts`, start a local proxy and round-robin individual API requests across hosts |
+| `--split-requests` / `--split-samples` | — | Experimental: with `--hosts`, start a local proxy and round-robin individual API requests across hosts; avoid for formal baselines |
 | `--proxy-port N` | `0` | Local request-splitting proxy port; `0` picks a free port automatically |
 | `--proxy-timeout N` | selected benchmark max | Upstream timeout for the local request-splitting proxy |
+| `--empty-pred-threshold-pct N` | `0` | Fail EvalScope benchmarks when empty predictions exceed this percentage |
 | `--vlm` | — | Run VLM/multimodal benchmarks only |
 | `--all` | — | Run all LLM + VLM benchmarks |
 | `--benches a,b,c` | — | Override benchmark list (comma-separated) |
 | `--resume` | — | Skip benchmarks that already have a `.done` marker |
 | `--report` | — | Print result summary table and exit (no benchmarks run) |
 
-All flags can also be set via environment variables: `MODEL`, `BASE_URL`, `API_KEY`, `EVAL_TOOL`, `BATCH_SIZE`, `TIMEOUT`, `VLLM_HOST`, `VLLM_PORT`.
+All flags can also be set via environment variables: `MODEL`, `BASE_URL`, `API_KEY`, `EVAL_TOOL`, `BATCH_SIZE`, `TIMEOUT`, `VLLM_HOST`, `VLLM_PORT`, `EMPTY_PRED_THRESHOLD_PCT`.
 
 ## Startup Sequence
 
@@ -148,7 +149,7 @@ python llm_bench.py --hosts 10.7.2.33,10.7.2.34 --model qwen2.5-7b --all --worke
 
 With 2 servers and `--workers 1` (default): 2 benchmarks run at any time, one per server. When a benchmark finishes the next one on that server starts immediately.
 
-For request-level load balancing, pass `--split-requests` (alias: `--split-samples`). The runner starts a local OpenAI-compatible proxy on the client node and points the eval tool at that proxy. Each individual API request is then round-robined across the backend hosts, so a single large benchmark such as `hmmt25` can use multiple independent vLLM servers:
+For request-level load balancing experiments, pass `--split-requests` (alias: `--split-samples`). The runner starts a local OpenAI-compatible proxy on the client node and points the eval tool at that proxy. Each individual API request is then round-robined across the backend hosts, so a single large benchmark such as `hmmt25` can use multiple independent vLLM servers:
 
 ```bash
 python llm_bench.py \
@@ -160,6 +161,8 @@ python llm_bench.py \
 ```
 
 The default `--proxy-port 0` binds an ephemeral localhost port. If your environment needs a fixed port, set `--proxy-port`. If your eval tool sends batched samples in one OpenAI request, the proxy cannot split inside that single HTTP request; it balances at API-request granularity.
+
+Do not use proxy splitting for formal baseline or regression measurements: upstream retries may hit a different backend host, which can hide infra failures and bias small long-CoT benchmarks. Use normal `--hosts` per-benchmark assignment for clean multi-server baselines.
 
 You can also use an external proxy such as nginx and point `--url` at it:
 
@@ -206,6 +209,8 @@ outputs/   tool output directories + <bench>.done markers
 
 `.done` marker files are written on success. `--resume` skips any benchmark that already has one, so interrupted runs (crash, timeout, Ctrl-C) can be continued without re-running completed benchmarks.
 
+For EvalScope runs, a post-run QA gate scans the newest review files for empty model predictions. Empty predictions usually indicate an infra-level serving/client failure rather than a normal model error. By default the gate is strict (`--empty-pred-threshold-pct 0`): any empty prediction writes `<bench>.failed`, does not write `<bench>.done`, and makes `--resume` rerun the benchmark. Increase `EMPTY_PRED_THRESHOLD_PCT` only for exploratory runs where you intentionally want to tolerate empty outputs.
+
 ### Reading results
 
 A summary table prints automatically at the end of every run. To read results at any time without running benchmarks — including while a run is still in progress in another terminal:
@@ -217,21 +222,18 @@ python llm_bench.py --report
 Example output:
 
 ```
-────────────────────────────────────────────────────────────
-Benchmark                Score   Tool         Completed
-────────────────────────────────────────────────────────────
-aime25                   42.0%   evalscope    2026-04-29 14:32
-gsm8k                    91.3%   evalscope    2026-04-29 12:10
-humaneval                78.5%   evalscope    2026-04-29 13:05
-mathvista                58.2%   evalscope    2026-04-29 15:47
-mmlu                     83.6%   evalscope    2026-04-29 11:48
-mmbench                  75.1%   evalscope    2026-04-29 16:20
-pope                       —     —            —
-────────────────────────────────────────────────────────────
-  6/7 benchmarks have results  (1 not yet parseable)
+────────────────────────────────────────────────────────────────────────────────────────
+Benchmark                 Score       N   Empty  Tool         Status             Completed
+────────────────────────────────────────────────────────────────────────────────────────
+aime25                    42.0%      30       0  evalscope    done               2026-04-29 14:32
+gsm8k                     91.3%    1319       0  evalscope    done               2026-04-29 12:10
+hmmt25                    90.0%      30       2  evalscope    FAIL empty=2/30    2026-04-29 15:20
+pope                         —       —       —  —            done               —
+────────────────────────────────────────────────────────────────────────────────────────
+  3/4 benchmarks have results  (1 not yet parseable, 1 failed)
 ```
 
-The report scans `outputs/` and auto-detects result files from all three tools (evalscope `report.json`, lm-eval `results_*.json`, opencompass `summary/*.csv`). Benchmarks still running or that failed show `—`.
+The report scans `outputs/` and auto-detects result files from all three tools (EvalScope reports, lm-eval `results_*.json`, opencompass `summary/*.csv`). It also surfaces `.failed` markers and the Empty count from EvalScope review files.
 
 ### Dataset caching
 
