@@ -525,7 +525,7 @@ def parse_args():
 Examples:
   %(prog)s --host 10.7.2.33 --model qwen2.5-7b
   %(prog)s --hosts 10.7.2.33:8000,10.7.2.34:8000 --model qwen2.5-7b --all
-  %(prog)s --hosts 10.7.2.33:8000,10.7.2.34:8000 --model qwen2.5-7b --benches hmmt25 --split-requests
+  %(prog)s --hosts 10.7.2.33:8000,10.7.2.34:8000 --model qwen2.5-7b --benches hmmt25 --split-requests  # experimental proxy mode
   %(prog)s --hosts 10.7.2.33,10.7.2.34 --model qwen2.5-vl-7b --vlm --workers 2
   %(prog)s --report
         """,
@@ -542,7 +542,8 @@ Examples:
     p.add_argument("--timeout",  type=int, default=int(os.environ.get("TIMEOUT", "120")),  help="Default timeout (s)")
     p.add_argument("--workers",  type=int, default=1, help="Concurrent benchmarks per host (default: 1)")
     p.add_argument("--split-requests", "--split-samples", action="store_true",
-                   help="With --hosts, round-robin individual API requests across hosts via a local proxy")
+                   help=("Experimental: with --hosts, round-robin individual API requests "
+                         "across hosts via a local proxy. Use normal --hosts for baseline runs."))
     p.add_argument("--proxy-port", type=int, default=int(os.environ.get("PROXY_PORT", "0")),
                    help="Local request-splitting proxy port (default: 0 = auto)")
     p.add_argument("--proxy-timeout", type=int, default=int(os.environ.get("PROXY_TIMEOUT", "0")),
@@ -607,6 +608,8 @@ def main():
         active_hosts = hosts
         proxy_url = None
         if split_requests:
+            print("[WARN] --split-requests uses a local proxy and upstream retries may hit different hosts.")
+            print("[WARN] Use normal --hosts mode for formal baseline/regression measurements.")
             proxy_timeout = args.proxy_timeout or max(
                 max(BENCH_TIMEOUT.get(bench, args.timeout), args.timeout)
                 for bench in benches
