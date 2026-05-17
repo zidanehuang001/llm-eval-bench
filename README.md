@@ -40,6 +40,9 @@ python llm_bench.py --host 10.7.2.33 --model qwen2.5-vl-7b --all
 | `--batch N` | `16` | Default eval batch size (per-benchmark overrides apply) |
 | `--timeout N` | `120` | Default per-request timeout in seconds (per-benchmark overrides apply) |
 | `--workers N` | `1` | Concurrent benchmarks per host (total = hosts × workers) |
+| `--split-requests` / `--split-samples` | — | With `--hosts`, start a local proxy and round-robin individual API requests across hosts |
+| `--proxy-port N` | `0` | Local request-splitting proxy port; `0` picks a free port automatically |
+| `--proxy-timeout N` | selected benchmark max | Upstream timeout for the local request-splitting proxy |
 | `--vlm` | — | Run VLM/multimodal benchmarks only |
 | `--all` | — | Run all LLM + VLM benchmarks |
 | `--benches a,b,c` | — | Override benchmark list (comma-separated) |
@@ -130,7 +133,7 @@ All VLM benchmarks use reduced batch sizes because image tokens consume signific
 
 ## Multi-server Distribution
 
-`--hosts` distributes benchmarks across servers using round-robin assignment and runs them concurrently via `ThreadPoolExecutor`. All hosts are warmed up before benchmarks start, output is serialised so lines never interleave.
+`--hosts` normally distributes whole benchmarks across servers using round-robin assignment and runs them concurrently via `ThreadPoolExecutor`. All hosts are warmed up before benchmarks start, output is serialised so lines never interleave.
 
 ```bash
 # Two servers, default port 8000
@@ -145,7 +148,20 @@ python llm_bench.py --hosts 10.7.2.33,10.7.2.34 --model qwen2.5-7b --all --worke
 
 With 2 servers and `--workers 1` (default): 2 benchmarks run at any time, one per server. When a benchmark finishes the next one on that server starts immediately.
 
-For request-level load balancing (every individual API call distributed across servers) use an nginx upstream instead:
+For request-level load balancing, pass `--split-requests` (alias: `--split-samples`). The runner starts a local OpenAI-compatible proxy on the client node and points the eval tool at that proxy. Each individual API request is then round-robined across the backend hosts, so a single large benchmark such as `hmmt25` can use multiple independent vLLM servers:
+
+```bash
+python llm_bench.py \
+  --hosts 10.7.2.33:8000,10.7.2.34:8000 \
+  --model qwen2.5-7b \
+  --benches hmmt25 \
+  --split-requests \
+  --timeout 900
+```
+
+The default `--proxy-port 0` binds an ephemeral localhost port. If your environment needs a fixed port, set `--proxy-port`. If your eval tool sends batched samples in one OpenAI request, the proxy cannot split inside that single HTTP request; it balances at API-request granularity.
+
+You can also use an external proxy such as nginx and point `--url` at it:
 
 ```nginx
 upstream vllm {

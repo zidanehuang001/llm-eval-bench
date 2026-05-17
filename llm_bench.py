@@ -2,6 +2,7 @@
 """LLM/VLM benchmark runner with concurrent multi-server support."""
 
 import argparse
+import contextlib
 import csv
 import glob
 import json
@@ -10,10 +11,12 @@ import re
 import select
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 
 try:
@@ -152,6 +155,117 @@ def warmup_host(url: str, model: str, api_key: str) -> tuple[bool, str]:
         return False, f"  [WARMUP] {label}  generation ping failed: {e}"
 
     return True, f"  [WARMUP] {label}  ready"
+
+# ─── Request-level proxy ──────────────────────────────────────────────────────
+_HOP_BY_HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+}
+
+class RoundRobinProxy(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, server_address, handler_cls, targets, timeout, api_key):
+        super().__init__(server_address, handler_cls)
+        self.targets = [t.rstrip("/") for t in targets]
+        self.timeout = timeout
+        self.api_key = api_key
+        self.counts = {target: 0 for target in self.targets}
+        self._idx = 0
+        self._lock = Lock()
+
+    def next_target(self):
+        with self._lock:
+            target = self.targets[self._idx % len(self.targets)]
+            self._idx += 1
+            self.counts[target] += 1
+            return target
+
+class ProxyHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        # Keep benchmark progress readable; downstream errors surface in tool logs.
+        return
+
+    def do_GET(self):
+        self._forward()
+
+    def do_POST(self):
+        self._forward()
+
+    def _target_url(self, target):
+        path = self.path
+        if path.startswith("/v1/"):
+            path = path[len("/v1"):]
+        elif path == "/v1":
+            path = "/"
+        return f"{target}{path}"
+
+    def _forward(self):
+        target = self.server.next_target()
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length) if length else None
+
+        headers = {
+            k: v for k, v in self.headers.items()
+            if k.lower() not in _HOP_BY_HOP_HEADERS
+            and k.lower() not in ("host", "content-length")
+        }
+        has_auth = any(k.lower() == "authorization" for k in headers)
+        if self.server.api_key and not has_auth:
+            headers["Authorization"] = f"Bearer {self.server.api_key}"
+
+        request = urllib.request.Request(
+            self._target_url(target),
+            data=body,
+            headers=headers,
+            method=self.command,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.server.timeout) as response:
+                payload = response.read()
+                status = response.status
+                response_headers = response.headers
+        except urllib.error.HTTPError as exc:
+            payload = exc.read()
+            status = exc.code
+            response_headers = exc.headers
+        except Exception as exc:
+            payload = json.dumps({
+                "error": f"proxy forward to {host_label(target)} failed: {exc}",
+            }).encode()
+            status = 502
+            response_headers = {"Content-Type": "application/json"}
+
+        self.send_response(status)
+        for key, value in response_headers.items():
+            if key.lower() in _HOP_BY_HOP_HEADERS or key.lower() == "content-length":
+                continue
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+@contextlib.contextmanager
+def request_proxy(targets, timeout, api_key, port=0):
+    """Run a local OpenAI-compatible proxy that round-robins requests."""
+    server = RoundRobinProxy(("127.0.0.1", port), ProxyHandler, targets, timeout, api_key)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, selected_port = server.server_address
+        proxy_url = f"http://{host}:{selected_port}/v1"
+        backend_labels = ", ".join(host_label(t) for t in server.targets)
+        log(f"  [PROXY] {host_label(proxy_url)} -> {backend_labels}  timeout={timeout}s")
+        yield proxy_url
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        counts = ", ".join(f"{host_label(t)}={server.counts[t]}" for t in server.targets)
+        log(f"  [PROXY] stopped; forwarded requests: {counts}")
 
 def build_command(bench, url, model, api_key, tool, batch, timeout, out_dir):
     if tool == "evalscope":
@@ -411,6 +525,7 @@ def parse_args():
 Examples:
   %(prog)s --host 10.7.2.33 --model qwen2.5-7b
   %(prog)s --hosts 10.7.2.33:8000,10.7.2.34:8000 --model qwen2.5-7b --all
+  %(prog)s --hosts 10.7.2.33:8000,10.7.2.34:8000 --model qwen2.5-7b --benches hmmt25 --split-requests
   %(prog)s --hosts 10.7.2.33,10.7.2.34 --model qwen2.5-vl-7b --vlm --workers 2
   %(prog)s --report
         """,
@@ -426,6 +541,12 @@ Examples:
     p.add_argument("--batch",    type=int, default=int(os.environ.get("BATCH_SIZE", "16")), help="Default batch size")
     p.add_argument("--timeout",  type=int, default=int(os.environ.get("TIMEOUT", "120")),  help="Default timeout (s)")
     p.add_argument("--workers",  type=int, default=1, help="Concurrent benchmarks per host (default: 1)")
+    p.add_argument("--split-requests", "--split-samples", action="store_true",
+                   help="With --hosts, round-robin individual API requests across hosts via a local proxy")
+    p.add_argument("--proxy-port", type=int, default=int(os.environ.get("PROXY_PORT", "0")),
+                   help="Local request-splitting proxy port (default: 0 = auto)")
+    p.add_argument("--proxy-timeout", type=int, default=int(os.environ.get("PROXY_TIMEOUT", "0")),
+                   help="Proxy upstream timeout in seconds (default: max selected benchmark timeout)")
     p.add_argument("--vlm",      action="store_true", help="Run VLM benchmarks only")
     p.add_argument("--all",      action="store_true", help="Run all LLM + VLM benchmarks")
     p.add_argument("--benches",  default="", help="Comma-separated benchmark override list")
@@ -477,88 +598,120 @@ def main():
         sys.exit(1)
     print()
 
-    # Round-robin assignment: bench i → hosts[i % len(hosts)]
-    assignments = [(bench, hosts[i % len(hosts)]) for i, bench in enumerate(benches)]
+    split_requests = args.split_requests and len(hosts) > 1
+    if args.split_requests and len(hosts) <= 1:
+        print("[WARN] --split-requests needs at least two hosts; falling back to normal mode.")
 
-    # Pre-run breakdown: show pending vs skip per host before anything starts
-    host_pending = {h: [] for h in hosts}
-    host_skip    = {h: [] for h in hosts}
-    for bench, url in assignments:
-        done_file = os.path.join(out_dir, f"{bench}.done")
-        if args.resume and os.path.exists(done_file):
-            host_skip[url].append(bench)
-        else:
-            host_pending[url].append(bench)
-
-    print("=" * 60)
-    print(f"  Tool:    {args.tool}")
-    print(f"  Model:   {args.model}")
-    print(f"  Workers: {args.workers} per host  ({len(hosts) * args.workers} concurrent max)")
-    print()
-    for i, h in enumerate(hosts):
-        lbl = host_label(h)
-        pending = host_pending[h]
-        skipped = host_skip[h]
-        print(f"  Host {i+1}: {lbl}")
-        print(f"    pending ({len(pending)}): {', '.join(pending) or '—'}")
-        if skipped:
-            print(f"    skip   ({len(skipped)}): {', '.join(skipped)}")
-    print("=" * 60)
-    print()
-
-    totals = {"pass": 0, "fail": 0, "skip": 0}
-    max_workers = len(hosts) * args.workers
-
-    # One status bar per benchmark + one overall progress bar at the bottom
-    if HAS_TQDM:
-        bench_bars = {}
-        for i, (bench, url) in enumerate(assignments):
-            label = host_label(url)
-            bar = tqdm(
-                total=0,
-                desc=f"  {bench:<14} [{label:<22}]: waiting",
-                bar_format="{desc}",
-                position=i,
-                leave=True,
+    proxy_context = None
+    try:
+        active_hosts = hosts
+        proxy_url = None
+        if split_requests:
+            proxy_timeout = args.proxy_timeout or max(
+                max(BENCH_TIMEOUT.get(bench, args.timeout), args.timeout)
+                for bench in benches
             )
-            bench_bars[(bench, url)] = bar
-        overall_bar = tqdm(
-            total=len(assignments),
-            desc="Overall",
-            position=len(assignments),
-            leave=True,
-            unit="bench",
-        )
-    else:
-        bench_bars, overall_bar = {}, None
+            proxy_context = request_proxy(hosts, proxy_timeout, args.api_key, args.proxy_port)
+            proxy_url = proxy_context.__enter__()
+            active_hosts = [proxy_url]
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                run_one, bench, url, args, out_dir, log_dir,
-                bench_bars.get((bench, url)), overall_bar
-            ): bench
-            for bench, url in assignments
-        }
-        for future in as_completed(futures):
-            try:
-                _, status = future.result()
-                totals[status] = totals.get(status, 0) + 1
-            except Exception as exc:
-                log(f"  Unexpected error: {exc}")
-                totals["fail"] += 1
+        # Round-robin assignment: benchmark i → active_hosts[i % len(active_hosts)].
+        # In request-split mode active_hosts is the local proxy, and the proxy
+        # round-robins the per-sample API requests across real backend hosts.
+        assignments = [(bench, active_hosts[i % len(active_hosts)]) for i, bench in enumerate(benches)]
 
-    for bar in bench_bars.values():
-        bar.close()
-    if overall_bar:
-        overall_bar.close()
+        # Pre-run breakdown: show pending vs skip per active host before anything starts
+        host_pending = {h: [] for h in active_hosts}
+        host_skip    = {h: [] for h in active_hosts}
+        for bench, url in assignments:
+            done_file = os.path.join(out_dir, f"{bench}.done")
+            if args.resume and os.path.exists(done_file):
+                host_skip[url].append(bench)
+            else:
+                host_pending[url].append(bench)
 
-    print()
-    print("=" * 60)
-    print(f"  Summary: {totals['pass']} passed, {totals['fail']} failed, {totals['skip']} skipped")
-    print("=" * 60)
+        print("=" * 60)
+        print(f"  Tool:    {args.tool}")
+        print(f"  Model:   {args.model}")
+        if split_requests:
+            print(f"  Split:   request-level round-robin across {len(hosts)} backend hosts")
+            print(f"  Proxy:   {host_label(proxy_url)}")
+            print(f"  Workers: {args.workers} per backend host  ({len(hosts) * args.workers} concurrent benchmark max)")
+            print()
+            for i, h in enumerate(hosts):
+                print(f"  Backend {i+1}: {host_label(h)}")
+            print()
+        else:
+            print(f"  Workers: {args.workers} per host  ({len(active_hosts) * args.workers} concurrent max)")
+            print()
+        for i, h in enumerate(active_hosts):
+            lbl = host_label(h)
+            pending = host_pending[h]
+            skipped = host_skip[h]
+            title = "Proxy" if split_requests else f"Host {i+1}"
+            print(f"  {title}: {lbl}")
+            print(f"    pending ({len(pending)}): {', '.join(pending) or '—'}")
+            if skipped:
+                print(f"    skip   ({len(skipped)}): {', '.join(skipped)}")
+        print("=" * 60)
+        print()
 
-    generate_report(out_dir)
+        totals = {"pass": 0, "fail": 0, "skip": 0}
+        max_workers = len(hosts) * args.workers if split_requests else len(active_hosts) * args.workers
+
+        # One status bar per benchmark + one overall progress bar at the bottom
+        if HAS_TQDM:
+            bench_bars = {}
+            for i, (bench, url) in enumerate(assignments):
+                label = host_label(url)
+                bar = tqdm(
+                    total=0,
+                    desc=f"  {bench:<14} [{label:<22}]: waiting",
+                    bar_format="{desc}",
+                    position=i,
+                    leave=True,
+                )
+                bench_bars[(bench, url)] = bar
+            overall_bar = tqdm(
+                total=len(assignments),
+                desc="Overall",
+                position=len(assignments),
+                leave=True,
+                unit="bench",
+            )
+        else:
+            bench_bars, overall_bar = {}, None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    run_one, bench, url, args, out_dir, log_dir,
+                    bench_bars.get((bench, url)), overall_bar
+                ): bench
+                for bench, url in assignments
+            }
+            for future in as_completed(futures):
+                try:
+                    _, status = future.result()
+                    totals[status] = totals.get(status, 0) + 1
+                except Exception as exc:
+                    log(f"  Unexpected error: {exc}")
+                    totals["fail"] += 1
+
+        for bar in bench_bars.values():
+            bar.close()
+        if overall_bar:
+            overall_bar.close()
+
+        print()
+        print("=" * 60)
+        print(f"  Summary: {totals['pass']} passed, {totals['fail']} failed, {totals['skip']} skipped")
+        print("=" * 60)
+
+        generate_report(out_dir)
+    finally:
+        if proxy_context is not None:
+            proxy_context.__exit__(*sys.exc_info())
 
 if __name__ == "__main__":
     main()
