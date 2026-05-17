@@ -693,7 +693,13 @@ def main():
             for future in as_completed(futures):
                 try:
                     _, status = future.result()
-                    totals[status] = totals.get(status, 0) + 1
+                    if status == "PASS":
+                        key = "pass"
+                    elif status == "skip":
+                        key = "skip"
+                    else:
+                        key = "fail"
+                    totals[key] += 1
                 except Exception as exc:
                     log(f"  Unexpected error: {exc}")
                     totals["fail"] += 1
