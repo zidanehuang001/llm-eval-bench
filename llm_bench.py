@@ -660,7 +660,25 @@ def main():
         print()
 
         totals = {"pass": 0, "fail": 0, "skip": 0}
-        max_workers = len(hosts) * args.workers if split_requests else len(active_hosts) * args.workers
+        workers_per_active_host = len(hosts) * args.workers if split_requests else args.workers
+
+        # Keep the documented "workers per host" behavior real. A single global
+        # pool can accidentally launch a second benchmark on a still-busy host
+        # when another host finishes early. Grouping by assigned host preserves
+        # one independent queue per endpoint; in split mode the single active
+        # host is the proxy, with concurrency scaled by backend count.
+        host_groups = {h: [] for h in active_hosts}
+        for bench, url in assignments:
+            host_groups[url].append((bench, url))
+
+        worker_chunks = []
+        for host_items in host_groups.values():
+            slots = min(workers_per_active_host, len(host_items))
+            for slot in range(slots):
+                chunk = host_items[slot::slots]
+                if chunk:
+                    worker_chunks.append(chunk)
+        max_workers = max(1, len(worker_chunks))
 
         # One status bar per benchmark + one overall progress bar at the bottom
         if HAS_TQDM:
@@ -685,24 +703,27 @@ def main():
         else:
             bench_bars, overall_bar = {}, None
 
+        def run_sequence(chunk):
+            results = []
+            for bench, url in chunk:
+                results.append(run_one(
+                    bench, url, args, out_dir, log_dir,
+                    bench_bars.get((bench, url)), overall_bar,
+                ))
+            return results
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    run_one, bench, url, args, out_dir, log_dir,
-                    bench_bars.get((bench, url)), overall_bar
-                ): bench
-                for bench, url in assignments
-            }
+            futures = {executor.submit(run_sequence, chunk): chunk for chunk in worker_chunks}
             for future in as_completed(futures):
                 try:
-                    _, status = future.result()
-                    if status == "PASS":
-                        key = "pass"
-                    elif status == "skip":
-                        key = "skip"
-                    else:
-                        key = "fail"
-                    totals[key] += 1
+                    for _, status in future.result():
+                        if status == "PASS":
+                            key = "pass"
+                        elif status == "skip":
+                            key = "skip"
+                        else:
+                            key = "fail"
+                        totals[key] += 1
                 except Exception as exc:
                     log(f"  Unexpected error: {exc}")
                     totals["fail"] += 1
