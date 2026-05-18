@@ -99,8 +99,6 @@ Per-benchmark timeout and batch size are set automatically. The `--timeout` and 
 |---|---|---|---|---|
 | `aime25` | AIME 2025 | Competition math | 600s | 4 |
 | `hmmt25` | HMMT 2025 | Competition math | 600s | 4 |
-| `hmmt26feb` | HMMT 2026 February | Competition math | 600s | 4 |
-| `cnmo2024` | CNMO 2024 | Competition math | 600s | 4 |
 | `math_500` | MATH-500 | Hard math problems | 300s | 8 |
 | `humaneval` | HumanEval | Python code generation | 300s | 8 |
 | `ifeval` | IFEval | Instruction-following | 240s | 16 |
@@ -113,6 +111,11 @@ Per-benchmark timeout and batch size are set automatically. The `--timeout` and 
 | `arc` | ARC-Challenge | Science QA | 120s | 16 |
 | `simple_qa` | SimpleQA | Factual short-answer | 120s | 16 |
 | `truthful_qa` | TruthfulQA | Factuality / avoiding misconceptions | 120s | 16 |
+
+`hmmt26feb` and `cnmo2024` are not native EvalScope datasets in the current
+cluster container. The runner keeps timeout/batch/repeat overrides for these
+names so custom adapters or external-tool bridges can pass them explicitly, but
+they are not included in the default LLM list.
 
 ### VLM / Multimodal
 

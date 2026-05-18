@@ -35,7 +35,7 @@ except ImportError:
 # ─── Benchmark lists ──────────────────────────────────────────────────────────
 LLM_BENCHES = [
     # Math / reasoning
-    "aime25", "hmmt25", "hmmt26feb", "cnmo2024", "gsm8k", "math_500",
+    "aime25", "hmmt25", "gsm8k", "math_500",
     # Coding
     "humaneval",
     # General knowledge
