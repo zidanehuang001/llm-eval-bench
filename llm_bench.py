@@ -35,7 +35,7 @@ except ImportError:
 # ─── Benchmark lists ──────────────────────────────────────────────────────────
 LLM_BENCHES = [
     # Math / reasoning
-    "aime25", "hmmt25", "gsm8k", "math_500",
+    "aime25", "hmmt25", "hmmt26feb", "cnmo2024", "gsm8k", "math_500",
     # Coding
     "humaneval",
     # General knowledge
@@ -61,7 +61,7 @@ VLM_BENCHES = [
 
 # ─── Per-benchmark overrides ──────────────────────────────────────────────────
 BENCH_TIMEOUT = {
-    "aime25": 600, "hmmt25": 600,
+    "aime25": 600, "hmmt25": 600, "hmmt26feb": 600, "cnmo2024": 600,
     "math_500": 300, "humaneval": 300, "ifeval": 240,
     "mmlu_pro": 600,
     "mmbench": 180, "mme": 180, "mmstar": 180, "seed_bench": 180,
@@ -71,7 +71,8 @@ BENCH_TIMEOUT = {
 }
 
 BENCH_BATCH = {
-    "aime25": 4, "hmmt25": 4, "math_500": 8, "humaneval": 8,
+    "aime25": 4, "hmmt25": 4, "hmmt26feb": 4, "cnmo2024": 4,
+    "math_500": 8, "humaneval": 8,
     "mmbench": 8, "mme": 8, "mmstar": 8, "seed_bench": 8,
     "pope": 8, "vqav2": 8, "textvqa": 8, "ocrbench": 8, "scienceqa": 8,
     "chartqa": 4, "docvqa": 4, "mathvista": 4, "hallusionbench": 4,
@@ -79,8 +80,8 @@ BENCH_BATCH = {
 
 BENCH_REPEATS = {
     # Keep defaults at 1 for broad smoke/core runs. For stable formal math
-    # numbers, pass --bench-repeats aime25=64,hmmt25=64 or --repeats 64 on a
-    # dedicated AIME/HMMT run.
+    # numbers, pass --bench-repeats aime25=64,hmmt26feb=64,cnmo2024=64 or
+    # --repeats 64 on a dedicated math-reasoning run.
 }
 
 # ─── Tool-specific name mappings ──────────────────────────────────────────────
