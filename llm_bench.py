@@ -77,6 +77,12 @@ BENCH_BATCH = {
     "chartqa": 4, "docvqa": 4, "mathvista": 4, "hallusionbench": 4,
 }
 
+BENCH_REPEATS = {
+    # Keep defaults at 1 for broad smoke/core runs. For stable formal math
+    # numbers, pass --bench-repeats aime25=64,hmmt25=64 or --repeats 64 on a
+    # dedicated AIME/HMMT run.
+}
+
 # ─── Tool-specific name mappings ──────────────────────────────────────────────
 LM_EVAL_MAP = {
     "mmlu": "mmlu", "mmlu_pro": "mmlu_pro", "gsm8k": "gsm8k",
@@ -118,6 +124,29 @@ def resolve_url(host_entry: str, default_port: str) -> str:
     if ":" in host_entry:
         return f"http://{host_entry}/v1"
     return f"http://{host_entry}:{default_port}/v1"
+
+
+def parse_bench_repeats(spec: str) -> dict[str, int]:
+    """Parse comma-separated per-benchmark repeats, e.g. aime25=64,hmmt25=64."""
+    repeats: dict[str, int] = {}
+    if not spec:
+        return repeats
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"Invalid --bench-repeats item {item!r}; expected bench=N")
+        bench, value = item.split("=", 1)
+        bench = bench.strip()
+        try:
+            n = int(value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid repeats value for {bench!r}: {value!r}") from exc
+        if not bench or n < 1:
+            raise ValueError(f"Invalid --bench-repeats item {item!r}; repeats must be >= 1")
+        repeats[bench] = n
+    return repeats
 
 def host_label(url: str) -> str:
     return url.replace("http://", "").replace("https://", "").replace("/v1", "")
@@ -268,7 +297,7 @@ def request_proxy(targets, timeout, api_key, port=0):
         counts = ", ".join(f"{host_label(t)}={server.counts[t]}" for t in server.targets)
         log(f"  [PROXY] stopped; forwarded requests: {counts}")
 
-def build_command(bench, url, model, api_key, tool, batch, timeout, out_dir):
+def build_command(bench, url, model, api_key, tool, batch, timeout, repeats, out_dir):
     if tool == "evalscope":
         return [
             "evalscope", "eval",
@@ -277,7 +306,7 @@ def build_command(bench, url, model, api_key, tool, batch, timeout, out_dir):
             "--api-key",         api_key,
             "--datasets",        bench,
             "--eval-batch-size", str(batch),
-            "--repeats",         "1",
+            "--repeats",         str(repeats),
             "--timeout",         str(timeout * 1000),  # evalscope expects milliseconds
         ]
     if tool == "lm-eval":
@@ -446,12 +475,13 @@ def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None
 
     timeout  = max(BENCH_TIMEOUT.get(bench, args.timeout), args.timeout)
     batch    = min(BENCH_BATCH.get(bench, args.batch),    args.batch)
+    repeats  = max(args.bench_repeats.get(bench, BENCH_REPEATS.get(bench, args.repeats)), 1)
     log_path = os.path.join(log_dir, f"{bench}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
-    log(f"  [START] {bench:<22} [{label}]  batch={batch}  timeout={timeout}s")
+    log(f"  [START] {bench:<22} [{label}]  batch={batch}  timeout={timeout}s  repeats={repeats}")
     _set("running...")
 
-    cmd = build_command(bench, url, args.model, args.api_key, args.tool, batch, timeout, out_dir)
+    cmd = build_command(bench, url, args.model, args.api_key, args.tool, batch, timeout, repeats, out_dir)
     started_at = time.time() - 2
     try:
         if HAS_PTY and bench_bar is not None:
@@ -667,6 +697,10 @@ Examples:
                    choices=["evalscope", "lm-eval", "opencompass"])
     p.add_argument("--batch",    type=int, default=int(os.environ.get("BATCH_SIZE", "16")), help="Default batch size")
     p.add_argument("--timeout",  type=int, default=int(os.environ.get("TIMEOUT", "120")),  help="Default timeout (s)")
+    p.add_argument("--repeats",  type=int, default=int(os.environ.get("REPEATS", "1")),
+                   help="Default EvalScope repeats per sample (default: 1)")
+    p.add_argument("--bench-repeats", default=os.environ.get("BENCH_REPEATS", ""),
+                   help="Comma-separated per-benchmark repeats, e.g. aime25=64,hmmt25=64")
     p.add_argument("--workers",  type=int, default=1, help="Concurrent benchmarks per host (default: 1)")
     p.add_argument("--split-requests", "--split-samples", action="store_true",
                    help=("Experimental: with --hosts, round-robin individual API requests "
@@ -683,7 +717,14 @@ Examples:
     p.add_argument("--benches",  default="", help="Comma-separated benchmark override list")
     p.add_argument("--resume",   action="store_true", help="Skip already-completed benchmarks")
     p.add_argument("--report",   action="store_true", help="Print results table and exit")
-    return p.parse_args()
+    args = p.parse_args()
+    try:
+        args.bench_repeats = parse_bench_repeats(args.bench_repeats)
+    except ValueError as exc:
+        p.error(str(exc))
+    if args.repeats < 1:
+        p.error("--repeats must be >= 1")
+    return args
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
