@@ -44,13 +44,15 @@ python llm_bench.py --host 10.7.2.33 --model qwen2.5-vl-7b --all
 | `--proxy-port N` | `0` | Local request-splitting proxy port; `0` picks a free port automatically |
 | `--proxy-timeout N` | selected benchmark max | Upstream timeout for the local request-splitting proxy |
 | `--empty-pred-threshold-pct N` | `0` | Fail EvalScope benchmarks when empty predictions exceed this percentage |
+| `--evalscope-use-cache DIR\|auto` | — | EvalScope sample-level resume cache. Use `auto` to find the newest matching `outputs/<timestamp>` cache for each benchmark |
+| `--evalscope-rerun-review` | — | With EvalScope cache, recompute review/scoring instead of trusting cached review rows |
 | `--vlm` | — | Run VLM/multimodal benchmarks only |
 | `--all` | — | Run all LLM + VLM benchmarks |
 | `--benches a,b,c` | — | Override benchmark list (comma-separated) |
 | `--resume` | — | Skip benchmarks that already have a `.done` marker |
 | `--report` | — | Print result summary table and exit (no benchmarks run) |
 
-All flags can also be set via environment variables: `MODEL`, `BASE_URL`, `API_KEY`, `EVAL_TOOL`, `BATCH_SIZE`, `TIMEOUT`, `VLLM_HOST`, `VLLM_PORT`, `EMPTY_PRED_THRESHOLD_PCT`.
+All flags can also be set via environment variables: `MODEL`, `BASE_URL`, `API_KEY`, `EVAL_TOOL`, `BATCH_SIZE`, `TIMEOUT`, `VLLM_HOST`, `VLLM_PORT`, `EMPTY_PRED_THRESHOLD_PCT`, `EVALSCOPE_USE_CACHE`, `EVALSCOPE_RERUN_REVIEW`.
 
 ## Startup Sequence
 
@@ -195,6 +197,15 @@ python llm_bench.py --host 10.7.2.33 --model qwen2.5-7b --benches gsm8k,mmlu,hum
 # Resume an interrupted run
 python llm_bench.py --hosts 10.7.2.33,10.7.2.34 --model qwen2.5-7b --all --resume
 
+# Resume an interrupted EvalScope benchmark at sample/cache level
+python llm_bench.py \
+  --host 10.7.2.33 \
+  --model qwen2.5-7b \
+  --benches aime25 \
+  --bench-repeats aime25=64 \
+  --evalscope-use-cache auto \
+  --evalscope-rerun-review
+
 # Read results from a previous run (from a second terminal while a run is in progress)
 python llm_bench.py --report
 
@@ -213,6 +224,8 @@ outputs/   tool output directories + <bench>.done markers
 ```
 
 `.done` marker files are written on success. `--resume` skips any benchmark that already has one, so interrupted runs (crash, timeout, Ctrl-C) can be continued without re-running completed benchmarks.
+
+For EvalScope, `--evalscope-use-cache` enables sample-level resume inside an interrupted benchmark. This is separate from `.done` marker resume: if a 64-repeat task times out after producing partial `outputs/<timestamp>` prediction/review files, rerun the same benchmark with `--evalscope-use-cache auto` to pass EvalScope's `--use-cache` option and continue from cached rows. Use an explicit cache directory instead of `auto` when resuming from another result folder.
 
 For EvalScope runs, a post-run QA gate scans the newest review files for empty model predictions. Empty predictions usually indicate an infra-level serving/client failure rather than a normal model error. By default the gate is strict (`--empty-pred-threshold-pct 0`): any empty prediction writes `<bench>.failed`, does not write `<bench>.done`, and makes `--resume` rerun the benchmark. Increase `EMPTY_PRED_THRESHOLD_PCT` only for exploratory runs where you intentionally want to tolerate empty outputs.
 

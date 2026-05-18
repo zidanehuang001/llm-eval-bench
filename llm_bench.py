@@ -298,9 +298,21 @@ def request_proxy(targets, timeout, api_key, port=0):
         counts = ", ".join(f"{host_label(t)}={server.counts[t]}" for t in server.targets)
         log(f"  [PROXY] stopped; forwarded requests: {counts}")
 
-def build_command(bench, url, model, api_key, tool, batch, timeout, repeats, out_dir):
+def build_command(
+    bench,
+    url,
+    model,
+    api_key,
+    tool,
+    batch,
+    timeout,
+    repeats,
+    out_dir,
+    evalscope_cache_dir=None,
+    evalscope_rerun_review=False,
+):
     if tool == "evalscope":
-        return [
+        cmd = [
             "evalscope", "eval",
             "--model",           model,
             "--api-url",         f"{url}/chat/completions",
@@ -310,6 +322,11 @@ def build_command(bench, url, model, api_key, tool, batch, timeout, repeats, out
             "--repeats",         str(repeats),
             "--timeout",         str(timeout * 1000),  # evalscope expects milliseconds
         ]
+        if evalscope_cache_dir:
+            cmd.extend(["--use-cache", evalscope_cache_dir])
+            if evalscope_rerun_review:
+                cmd.append("--rerun-review")
+        return cmd
     if tool == "lm-eval":
         task = LM_EVAL_MAP.get(bench, bench)
         return [
@@ -409,6 +426,38 @@ def _bench_review_files(out_dir, bench, since=None):
     )
     return sorted(groups[newest_dir])
 
+def _evalscope_run_dirs_for_bench(out_dir, bench):
+    """Return EvalScope timestamp dirs that appear to contain this benchmark."""
+    bench_lower = bench.lower()
+    bench_prefix = f"{bench_lower}_"
+    candidates = {}
+    patterns = [
+        os.path.join(out_dir, "*", "reviews", "*", "*.jsonl"),
+        os.path.join(out_dir, "*", "predictions", "*", "*.jsonl"),
+        os.path.join(out_dir, "*", "reports", "*", "*.json"),
+    ]
+    for pattern in patterns:
+        for path in glob.glob(pattern):
+            name = os.path.basename(path).lower()
+            if not (
+                name == f"{bench_lower}.jsonl"
+                or name == f"{bench_lower}.json"
+                or name.startswith(bench_prefix)
+            ):
+                continue
+            timestamp_dir = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+            candidates[timestamp_dir] = max(
+                candidates.get(timestamp_dir, 0),
+                os.path.getmtime(path),
+            )
+    return [
+        path for path, _ in sorted(candidates.items(), key=lambda item: item[1])
+    ]
+
+def _newest_evalscope_cache_dir(out_dir, bench):
+    dirs = _evalscope_run_dirs_for_bench(out_dir, bench)
+    return dirs[-1] if dirs else None
+
 def _prediction_from_review(row):
     score = ((row.get("sample_score") or {}).get("score") or {})
     if "prediction" in score:
@@ -479,10 +528,34 @@ def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None
     repeats  = max(args.bench_repeats.get(bench, BENCH_REPEATS.get(bench, args.repeats)), 1)
     log_path = os.path.join(log_dir, f"{bench}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
+    evalscope_cache_dir = None
+    if args.tool == "evalscope" and args.evalscope_use_cache:
+        if args.evalscope_use_cache == "auto":
+            evalscope_cache_dir = _newest_evalscope_cache_dir(out_dir, bench)
+            if evalscope_cache_dir:
+                log(f"  [CACHE] {bench:<22} using EvalScope cache: {evalscope_cache_dir}")
+            else:
+                log(f"  [CACHE] {bench:<22} no EvalScope cache found; starting fresh")
+        else:
+            evalscope_cache_dir = args.evalscope_use_cache
+            log(f"  [CACHE] {bench:<22} using EvalScope cache: {evalscope_cache_dir}")
+
     log(f"  [START] {bench:<22} [{label}]  batch={batch}  timeout={timeout}s  repeats={repeats}")
     _set("running...")
 
-    cmd = build_command(bench, url, args.model, args.api_key, args.tool, batch, timeout, repeats, out_dir)
+    cmd = build_command(
+        bench,
+        url,
+        args.model,
+        args.api_key,
+        args.tool,
+        batch,
+        timeout,
+        repeats,
+        out_dir,
+        evalscope_cache_dir=evalscope_cache_dir,
+        evalscope_rerun_review=args.evalscope_rerun_review,
+    )
     started_at = time.time() - 2
     try:
         if HAS_PTY and bench_bar is not None:
@@ -492,7 +565,8 @@ def run_one(bench, url, args, out_dir, log_dir, bench_bar=None, overall_bar=None
                 proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
         if proc.returncode == 0:
             if args.tool == "evalscope":
-                total, empties, files = scan_empty_predictions(out_dir, bench, since=started_at)
+                qa_since = None if evalscope_cache_dir else started_at
+                total, empties, files = scan_empty_predictions(out_dir, bench, since=qa_since)
                 if total:
                     empty_pct = len(empties) / total * 100
                     log(f"  [QA]    {bench:<22} reviews={total} empty={len(empties)} ({empty_pct:.2f}%)")
@@ -713,6 +787,13 @@ Examples:
     p.add_argument("--empty-pred-threshold-pct", type=float,
                    default=float(os.environ.get("EMPTY_PRED_THRESHOLD_PCT", "0")),
                    help="Fail evalscope benchmarks when empty predictions exceed this percent (default: 0)")
+    p.add_argument("--evalscope-use-cache", default=os.environ.get("EVALSCOPE_USE_CACHE", ""),
+                   help=("EvalScope sample-level resume cache. Use 'auto' to find the newest "
+                         "matching outputs/<timestamp> cache for each benchmark, or pass a "
+                         "specific EvalScope output directory. Empty string disables it."))
+    p.add_argument("--evalscope-rerun-review", action="store_true",
+                   default=os.environ.get("EVALSCOPE_RERUN_REVIEW", "").lower() in ("1", "true", "yes"),
+                   help="When using EvalScope cache, pass --rerun-review to recompute review/scoring.")
     p.add_argument("--vlm",      action="store_true", help="Run VLM benchmarks only")
     p.add_argument("--all",      action="store_true", help="Run all LLM + VLM benchmarks")
     p.add_argument("--benches",  default="", help="Comma-separated benchmark override list")
